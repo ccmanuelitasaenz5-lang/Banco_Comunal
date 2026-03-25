@@ -1,0 +1,119 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SemilleroComunal — Configuración Inicial</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif}
+body{background:linear-gradient(135deg,#0C447C 0%,#1D9E75 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:white;border-radius:20px;padding:36px;width:100%;max-width:700px;box-shadow:0 20px 60px rgba(0,0,0,0.3)}
+.logo{text-align:center;margin-bottom:24px}
+.logo h1{color:#0C447C;font-size:24px;font-weight:700}
+.logo p{color:#64748b;font-size:12px;margin-top:4px;line-height:1.6}
+.step{background:#f8fafc;border-radius:10px;padding:16px;margin-bottom:14px;border-left:4px solid #0C447C}
+.step.verde{border-color:#1D9E75}
+.step.morado{border-color:#534AB7}
+.step.naranja{border-color:#BA7517}
+.step h3{font-size:11px;font-weight:700;color:#0C447C;margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px}
+.step.verde h3{color:#0F6E56}.step.morado h3{color:#534AB7}.step.naranja h3{color:#BA7517}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.fg{margin-bottom:10px}
+.fg label{display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:4px}
+.fg input,.fg select{width:100%;padding:8px 11px;border:1px solid #d1d5db;border-radius:7px;font-size:13px}
+.fg input:focus,.fg select:focus{outline:none;border-color:#0C447C}
+.hint{font-size:10px;color:#94a3b8;margin-top:3px}
+.vocera-row{background:white;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:8px}
+.vocera-num{font-size:11px;font-weight:700;color:#534AB7;margin-bottom:8px}
+.btn{width:100%;padding:13px;background:#0C447C;color:white;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;margin-top:8px}
+.btn:hover{background:#185FA5}
+.credits{text-align:center;font-size:10px;color:#94a3b8;margin-top:14px;line-height:1.8}
+</style></head><body>
+<div class="card">
+  <div class="logo">
+    <div style="font-size:44px">🌱</div>
+    <h1>SemilleroComunal v1.2</h1>
+    <p>Sembramos confianza, cosechamos comunidad<br>
+    <strong style="color:#0C447C">Configuración inicial</strong> — solo se realiza una vez</p>
+  </div>
+  <form method="POST">
+
+    <div class="step">
+      <h3>📍 Datos de la Comuna y el Banco</h3>
+      <div class="fg"><label>Nombre de la Comuna *</label>
+        <input type="text" name="nombre_comuna" placeholder="Ej: Comuna Productiva Simón Bolívar" required></div>
+      <div class="fg"><label>Nombre del Banco Comunal *</label>
+        <input type="text" name="nombre_banco" placeholder="Ej: Banco de la Comuna Simón Bolívar" required></div>
+      <div class="grid-2">
+        <div class="fg"><label>Estado *</label>
+          <select name="estado" id="sel-estado" required onchange="cargarMuns()">
+            <option value="">— Seleccionar estado —</option>
+            {% for e in estados %}<option value="{{ e }}">{{ e }}</option>{% endfor %}
+          </select></div>
+        <div class="fg"><label>Municipio *</label>
+          <select name="municipio" id="sel-municipio" required>
+            <option value="">— Primero selecciona estado —</option>
+          </select></div>
+      </div>
+      <div class="fg"><label>Ciudad / Localidad *</label>
+        <input type="text" name="ciudad" placeholder="Ej: El Vigía" required></div>
+    </div>
+
+    <div class="step morado">
+      <h3>👥 Voceras/Voceros del Banco Comunal</h3>
+      <p style="font-size:11px;color:#64748b;margin-bottom:12px">Ingresa los datos de las/los voceras/voceros autorizados. Aparecerán en los contratos.</p>
+      {% for i in range(1, 4) %}
+      <div class="vocera-row">
+        <div class="vocera-num">Vocera/o {{ i }}</div>
+        <div class="grid-3">
+          <div class="fg"><label>Nombres</label><input type="text" name="vocera{{ i }}_nombres" placeholder="Nombres"></div>
+          <div class="fg"><label>Apellidos</label><input type="text" name="vocera{{ i }}_apellidos" placeholder="Apellidos"></div>
+          <div class="fg"><label>Cédula</label><input type="text" name="vocera{{ i }}_cedula" placeholder="V-XX.XXX.XXX"></div>
+        </div>
+      </div>
+      {% endfor %}
+      <div class="hint" style="font-size:11px;color:#64748b;margin-top:4px">Puedes agregar más voceras/voceros después desde la configuración de la app.</div>
+    </div>
+
+    <div class="step">
+      <h3>👤 Cuenta de Acceso</h3>
+      <div class="fg"><label>Nombre completo del administrador</label>
+        <input type="text" name="nombre_completo" placeholder="Tu nombre completo"></div>
+      <div class="grid-2">
+        <div class="fg"><label>Usuario *</label><input type="text" name="usuario" required placeholder="Ej: enrique"></div>
+        <div class="fg"><label>Contraseña *</label><input type="password" name="password" required minlength="6" placeholder="Mínimo 6 caracteres"></div>
+      </div>
+      <div class="fg"><label>Pregunta de seguridad *</label>
+        <select name="pregunta" required>
+          <option value="">— Seleccionar —</option>
+          <option>¿Cuál es el nombre de tu primera mascota?</option>
+          <option>¿En qué ciudad naciste?</option>
+          <option>¿Cuál es el nombre de tu madre?</option>
+          <option>¿Cuál es tu comida favorita?</option>
+          <option>¿Cuál es el nombre de tu escuela primaria?</option>
+        </select></div>
+      <div class="fg"><label>Respuesta *</label>
+        <input type="text" name="respuesta" required placeholder="Anota esta respuesta — la necesitarás para recuperar acceso">
+        <div class="hint">⚠️ Tus datos nunca se pierden al recuperar contraseña</div></div>
+    </div>
+
+    <div class="step verde">
+      <h3>🤖 Inteligencia Artificial (OCR)</h3>
+      <div class="fg"><label>API Key de Google Gemini *</label>
+        <input type="password" name="api_key" required placeholder="AIzaSy...">
+        <div class="hint">Gratis en <strong>aistudio.google.com</strong> con tu Gmail · Sin tarjeta de crédito</div></div>
+    </div>
+
+    <button type="submit" class="btn">✓ Completar configuración e iniciar →</button>
+  </form>
+  <div class="credits">
+    Desarrollado por <strong>Enrique Maduro</strong> · Hecho con Claude AI 🤖 · v1.2 — 2026
+  </div>
+</div>
+<script>
+const muns={{ municipios_json|safe }};
+function cargarMuns(){
+  const e=document.getElementById('sel-estado').value;
+  const s=document.getElementById('sel-municipio');
+  s.innerHTML='<option value="">— Seleccionar municipio —</option>';
+  (muns[e]||[]).forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;s.appendChild(o);});
+}
+</script>
+</body></html>

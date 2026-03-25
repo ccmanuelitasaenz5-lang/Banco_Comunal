@@ -1,0 +1,69 @@
+🌱 SEMILLEROCOMUNAL v2.1
+"Sembramos confianza, cosechamos comunidad"
+================================================
+Desarrollado por: Enrique Maduro
+Hecho con Claude AI 🤖 · v2.1 — 2026
+================================================
+
+INSTALACIÓN (solo la primera vez)
+----------------------------------
+1. Copia esta carpeta donde quieras (temporal)
+2. Doble clic en: INSTALAR.bat
+3. El instalador:
+   ✓ Crea D:\BancoComunal\ automáticamente
+   ✓ Copia todos los archivos allí
+   ✓ Instala las dependencias de Python (reportlab, bcrypt, google-generativeai, python-docx, python-pptx, faker)
+   ✓ Crea icono 🌱 en el Escritorio
+   ✓ Abre la app automáticamente
+
+4. Completa la configuración inicial:
+   - Nombre de tu Comuna y Banco
+   - Estado y Municipio (para centrar el mapa)
+   - Datos de las Voceras/Voceros
+   - Tu usuario y contraseña
+   - API Key de Google Gemini (para el OCR inteligente)
+
+USO DIARIO
+-----------
+Doble clic en el ícono 🌱 SemilleroComunal del Escritorio
+¡Un solo clic, sin ventanas de comandos!
+
+MÓDULOS v2.1
+-------------
+✅ Dashboard          - Resumen + termómetro + alertas de mora
+✅ Beneficiarios      - Lista + edición + ELIMINAR (Soft Delete)
+✅ Registrar Pagos    - Con OCR de comprobantes (Gemini AI)
+✅ Mapa               - OpenStreetMap + ubicación manual corregida
+✅ Historias          - Texto + fotos de impacto de proyectos
+✅ Estado del Banco   - Movimientos consolidados + saldo real
+✅ Contratos          - Generación dinámica (.docx) + voceras
+✅ Estadísticas       - Gráficas avanzadas de cartera e impacto
+✅ Informe PDF        - Descarga mensual profesional (ReportLab)
+✅ Presentación PPTX  - Diapositivas para asambleas (python-pptx)
+✅ Nuevo Beneficiario - Con OCR automático de Cédula y RIF
+✅ Configuración      - Gestión de Voceras, Usuarios y API Key
+✅ Recuperación       - Sistema de seguridad para olvidar clave
+
+RECUPERAR CONTRASEÑA
+---------------------
+Si olvidas tu contraseña:
+1. Abre http://localhost:5000/recuperar
+2. Responde tu pregunta de seguridad
+3. Crea nueva contraseña
+4. Tus datos NO se pierden
+
+ESTRUCTURA DE CARPETAS
+-----------------------
+D:\BancoComunal\
+├── app.py                  ← Motor principal
+├── SemilleroComunal.vbs    ← Lanzador (1 clic)
+├── INSTALAR.bat            ← Ejecutar solo 1 vez
+├── datos\
+│   └── semillero.db        ← Base de datos (NO borrar)
+├── documentos\             ← Contratos generados
+├── fotos\                  ← Fotos de beneficiarios
+├── reportes\               ← Informes PDF y PPTX
+├── plantillas\             ← Tu modelo de contrato
+├── backups\                ← Copias de seguridad
+└── static\img\
+    └── semillero.ico       ← Ícono de la app

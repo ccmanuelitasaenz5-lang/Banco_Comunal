@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SemilleroComunal — Recuperar Acceso</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif }
+    body { background: linear-gradient(135deg, #0C447C, #1D9E75); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px }
+    .card { background: white; border-radius: 20px; padding: 36px; width: 100%; max-width: 420px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.2) }
+    .logo { font-size: 40px; margin-bottom: 10px }
+    h1 { color: #0C447C; font-size: 20px; margin-bottom: 6px }
+    .sub { color: #64748b; font-size: 12px; margin-bottom: 24px }
+    .fg { margin-bottom: 14px; text-align: left }
+    .fg label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px }
+    .fg input { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; transition: border-color 0.2s }
+    .fg input:focus { outline: none; border-color: #0C447C; box-shadow: 0 0 0 3px rgba(12,68,124,0.1) }
+    .btn { width: 100%; padding: 12px; background: #0C447C; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; transition: background 0.2s }
+    .btn:hover { background: #185FA5 }
+    .error { background: #FCEBEB; color: #791F1F; padding: 10px; border-radius: 8px; font-size: 12px; margin-bottom: 14px; border: 1px solid #FECACA }
+    .info { background: #E6F1FB; color: #0C447C; padding: 10px; border-radius: 8px; font-size: 12px; margin-bottom: 14px; border: 1px solid #BFDBFE }
+    .back { font-size: 12px; margin-top: 14px; display: block }
+    .back a { color: #0C447C; text-decoration: none; font-weight: 600 }
+    .back a:hover { text-decoration: underline }
+    .security-note { font-size: 11px; color: #64748b; margin-top: 4px; font-style: italic }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <div class="logo">🔐</div>
+  <h1>Recuperar Acceso</h1>
+  <p class="sub">Tus datos nunca se pierden al restablecer la contraseña</p>
+
+  {% if error %}
+    <div class="error">{{ error }}</div>
+  {% endif %}
+
+  {% if paso == 1 %}
+    <!-- PASO 1: Ingresar Usuario -->
+    <div class="info">Ingresa tu nombre de usuario para continuar</div>
+    <form method="POST">
+      <input type="hidden" name="paso" value="1">
+      <div class="fg">
+        <label for="username">Usuario</label>
+        <input type="text" id="username" name="username" required autofocus autocomplete="username">
+      </div>
+      <button type="submit" class="btn">Continuar →</button>
+    </form>
+
+  {% elif paso == 2 %}
+    <!-- PASO 2: Verificar Seguridad y Nueva Clave -->
+    <div class="info">Responde la pregunta de seguridad para restablecer tu contraseña</div>
+    <form method="POST">
+      <input type="hidden" name="paso" value="2">
+      <input type="hidden" name="username" value="{{ username }}">
+      
+      <div class="fg">
+        <label>Pregunta de seguridad</label>
+        <div style="padding:10px; background:#f8fafc; border-radius:8px; font-size:13px; color:#374151; border:1px solid #e2e8f0;">
+          {{ pregunta }}
+        </div>
+      </div>
+
+      <div class="fg">
+        <label for="respuesta">Tu respuesta</label>
+        <!-- CORRECCIÓN CRÍTICA: type="password" para ocultar la respuesta -->
+        <input type="password" id="respuesta" name="respuesta" required autofocus autocomplete="off" placeholder="Escribe tu respuesta aquí">
+        <div class="security-note">🔒 La respuesta es confidencial y no se mostrará en pantalla.</div>
+      </div>
+
+      <div class="fg">
+        <label for="nueva_password">Nueva contraseña</label>
+        <input type="password" id="nueva_password" name="nueva_password" required minlength="6" autocomplete="new-password" placeholder="Mínimo 6 caracteres">
+      </div>
+
+      <div class="fg">
+        <label for="confirmar_password">Confirmar nueva contraseña</label>
+        <input type="password" id="confirmar_password" name="confirmar_password" required minlength="6" autocomplete="new-password" placeholder="Repite la contraseña">
+      </div>
+
+      <button type="submit" class="btn">Restablecer contraseña →</button>
+    </form>
+
+  {% elif paso == 3 %}
+    <!-- PASO 3: Éxito -->
+    <div class="info" style="background:#ECFDF5; color:#065F46; border-color:#A7F3D0;">
+      {{ mensaje }}
+    </div>
+    <a href="/login" class="btn" style="display:block; text-align:center; text-decoration:none;">Ir a Iniciar Sesión</a>
+  {% endif %}
+
+  <div class="back">
+    <a href="/login">← Volver al inicio de sesión</a>
+  </div>
+</div>
+
+</body>
+</html>
