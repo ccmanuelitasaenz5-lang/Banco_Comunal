@@ -259,13 +259,24 @@ def setup():
             
             c.execute("""INSERT OR REPLACE INTO usuarios
                (username,password_hash,pregunta_seguridad,respuesta_hash,nombre_completo,rol)
-               VALUES(?,?,?,?,?,'admin')""",
+               VALUES(?,?,?,?,?,?)""",
                 (d.get('usuario','').strip(),
                  hash_pw(d.get('password','')),
                  d.get('pregunta'),
                  hash_pw(d.get('respuesta','').lower().strip()),
-                 d.get('nombre_completo','').strip())
+                 d.get('nombre_completo','').strip(),
+                 'admin')
             )
+            
+            # Validar que el usuario se creó correctamente
+            verificar_usuario = c.execute("SELECT id FROM usuarios WHERE username=?", 
+                                         (d.get('usuario','').strip(),)).fetchone()
+            if not verificar_usuario:
+                conn.rollback()
+                conn.close()
+                errores['general'] = 'Error al crear el usuario. Por favor, intenta nuevamente.'
+                return render_template('setup.html', errores=errores, valores=d, 
+                                     estados=list(MUNICIPIOS_VE.keys()))
             
             for i in range(1,4):
                 nom = d.get(f'vocera{i}_nombres','').strip()
@@ -311,6 +322,7 @@ def login():
                 session['rol']     = u['rol']
                 return redirect(url_for('index'))
             error = 'Usuario o contraseña incorrectos.'
+            logger.warning(f"Intento de login fallido para usuario: {username_val}")
 
     return render_template('login.html',
         error=error,
