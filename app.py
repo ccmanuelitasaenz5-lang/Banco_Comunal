@@ -24,6 +24,13 @@ else:
         _f.write(_key)
     app.secret_key = _key
 
+@app.after_request
+def add_header(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, public, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
 # Logging Centralizado
 _LOG_DIR = os.path.join(BASE_DIR, 'datos')
 os.makedirs(_LOG_DIR, exist_ok=True)
@@ -163,7 +170,21 @@ def init_db():
     CREATE TABLE IF NOT EXISTS contratos_generados(id INTEGER PRIMARY KEY AUTOINCREMENT,
         beneficiario_id INTEGER, contrato TEXT, ruta_archivo TEXT,
         fecha_generacion TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS transacciones_banco(id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL, referencia TEXT UNIQUE NOT NULL,
+        descripcion TEXT, codigo TEXT, debito REAL DEFAULT 0.0,
+        credito REAL DEFAULT 0.0, saldo REAL, reconciliado INTEGER DEFAULT 0,
+        pago_id INTEGER, fecha_registro TEXT DEFAULT CURRENT_TIMESTAMP);
     """)
+    # Migraciones seguras para actualizar pagos con campos de conciliacion
+    try:
+        conn.execute("ALTER TABLE pagos ADD COLUMN conciliado INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE pagos ADD COLUMN banco_id_referencia TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -213,7 +234,7 @@ def seed_beneficiarios_ficticios():
 @app.route('/index')
 @login_required
 def index(): 
-    return render_template('dashboard.html')
+    return render_template('index_v23.html')
 
 @app.route('/setup', methods=['GET','POST'])
 def setup():
@@ -399,7 +420,10 @@ def api_config():
     cfg['map_lat']=coords[0]
     cfg['map_lng']=coords[1]
     cfg['usuario']=session.get('nombre', session.get('usuario',''))
+    cfg['has_api_key'] = bool(cfg.get('api_key'))
+    cfg['has_groq_key'] = bool(cfg.get('groq_api_key'))
     cfg.pop('api_key', None)
+    cfg.pop('groq_api_key', None)
     return jsonify(cfg)
 
 @app.route('/api/municipios/<estado>')
@@ -435,12 +459,14 @@ def actualizar_config():
     d=request.json
     conn=get_db()
     c=conn.cursor()
-    campos=['nombre_comuna','nombre_banco','estado','municipio','ciudad']
+    campos=['nombre_comuna','nombre_banco','estado','municipio','ciudad','api_preferida']
     for campo in campos:
         if campo in d:
             c.execute("INSERT OR REPLACE INTO config_sistema(clave,valor) VALUES(?,?)",(campo,d[campo]))
-    if d.get('api_key'):
+    if 'api_key' in d:
         c.execute("INSERT OR REPLACE INTO config_sistema(clave,valor) VALUES('api_key',?)",(d['api_key'],))
+    if 'groq_api_key' in d:
+        c.execute("INSERT OR REPLACE INTO config_sistema(clave,valor) VALUES('groq_api_key',?)",(d['groq_api_key'],))
     conn.commit()
     conn.close()
     return jsonify({"ok":True})
@@ -665,12 +691,21 @@ def api_dashboard():
     pagados=c.execute("SELECT COUNT(*) FROM beneficiarios WHERE activo=1 AND cuotas_pagadas >=11").fetchone()[0]
     sectores=c.execute("SELECT sector,COUNT(*) cnt FROM beneficiarios WHERE activo=1 GROUP BY sector ORDER BY cnt DESC").fetchall()
     ult=c.execute("SELECT p.fecha_pago,p.monto_usd,b.nombres||' '||b.apellidos nombre FROM pagos p JOIN beneficiarios b ON p.beneficiario_id=b.id ORDER BY p.fecha_registro DESC LIMIT 5").fetchall()
+    # Datos para alertas de RIF
+    rif_inf = c.execute("SELECT id, nombres||' '||apellidos as nombre, contrato, rif_vencimiento FROM beneficiarios WHERE activo=1 AND rif_vencimiento IS NOT NULL").fetchall()
+    
     conn.close()
+    
+    pct_rec = round((cobrado / cartera * 100), 2) if cartera > 0 else 0
+    
     return jsonify({
         "total_beneficiarios":total, "cartera_total":cartera, "monto_cobrado":round(cobrado,2),
         "saldo_pendiente":round(cartera-cobrado,2), "en_mora":mora, "al_dia":al_dia, "pagados_completo":pagados,
+        "porcentaje_recuperacion": pct_rec,
         "sectores":[{"sector":r["sector"] or "Sin sector", "count":r["cnt"]} for r in sectores],
-        "ultimos_pagos":[dict(r) for r in ult]
+        "ultimos_pagos":[dict(r) for r in ult],
+        "rif_info": [dict(r) for r in rif_inf],
+        "sync": "v2.3"
     })
 
 # --- BENEFICIARIOS Y MAPA (CON ELIMINAR Y CORRECCIÓN DE MARCADOR) ---
@@ -693,30 +728,135 @@ def api_beneficiario(bid):
     if not b: return jsonify({"error": "No encontrado"}),404
     return jsonify({"beneficiario":dict(b), "pagos":[dict(p) for p in pagos]})
 
-# 🆕 NUEVA FUNCIÓN: ELIMINAR BENEFICIARIO (Soft Delete)
+# 🆕 NUEVA FUNCIÓN: ELIMINAR BENEFICIARIO (Soft Delete + Force)
 @app.route('/api/beneficiarios/<int:bid>/eliminar', methods=['POST'])
 @login_required
 def eliminar_beneficiario(bid):
+    d = request.json or {}
+    force = d.get('force', False)
+
     conn = get_db()
     c = conn.cursor()
     
-    # Verificar si tiene pagos registrados
+    # Verificar si tiene pagos registrados (nunca se permite, ni con force)
     pagos = c.execute("SELECT COUNT(*) FROM pagos WHERE beneficiario_id=?", (bid,)).fetchone()[0]
     if pagos > 0:
         conn.close()
-        return jsonify({"error": "No se puede eliminar: Este beneficiario ya tiene pagos registrados. Debes desactivarlo manualmente en la DB o contactar al administrador."}), 400
+        return jsonify({"error": "No se puede eliminar: Este beneficiario tiene pagos registrados. Imposible eliminar registros con historial financiero."}), 400
     
-    # Verificar si tiene contratos generados
+    # Verificar contratos generados
     contratos = c.execute("SELECT COUNT(*) FROM contratos_generados WHERE beneficiario_id=?", (bid,)).fetchone()[0]
-    if contratos > 0:
-         conn.close()
-         return jsonify({"error": "No se puede eliminar: Existen contratos generados para este beneficiario."}), 400
+    if contratos > 0 and not force:
+        conn.close()
+        return jsonify({
+            "error_tipo": "contratos",
+            "error": f"Este beneficiario tiene {contratos} contrato(s) registrado(s).",
+            "contratos": contratos
+        }), 400
+
+    # Si force=True, eliminar primero los registros de contratos
+    if force and contratos > 0:
+        c.execute("DELETE FROM contratos_generados WHERE beneficiario_id=?", (bid,))
 
     # Soft Delete: Cambiar activo a 0
     c.execute("UPDATE beneficiarios SET activo=0 WHERE id=?", (bid,))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "mensaje": "Beneficiario eliminado correctamente."})
+
+# 🆕 GEOCODIFICAR BENEFICIARIO desde su dirección (Nominatim/OpenStreetMap)
+@app.route('/api/beneficiarios/<int:bid>/geocodificar', methods=['POST'])
+@login_required
+def geocodificar_beneficiario(bid):
+    import urllib.request, urllib.parse, time
+    conn = get_db()
+    b = conn.execute("SELECT * FROM beneficiarios WHERE id=?", (bid,)).fetchone()
+    conn.close()
+    if not b:
+        return jsonify({"error": "Beneficiario no encontrado"}), 404
+    b = dict(b)
+
+    cfg_conn = get_db()
+    ciudad = cfg_conn.execute("SELECT valor FROM config_sistema WHERE clave='ciudad'").fetchone()
+    estado = cfg_conn.execute("SELECT valor FROM config_sistema WHERE clave='estado'").fetchone()
+    cfg_conn.close()
+    ciudad = ciudad['valor'] if ciudad else ''
+    estado = estado['valor'] if estado else 'Venezuela'
+
+    direccion = (b.get('direccion_real') or b.get('direccion') or '').strip()
+    sector    = (b.get('sector') or '').strip()
+
+    partes = [p for p in [direccion, sector, ciudad, 'Venezuela'] if p]
+    query  = ', '.join(partes)
+
+    url = 'https://nominatim.openstreetmap.org/search?' + urllib.parse.urlencode(
+        {'q': query, 'format': 'json', 'limit': 1, 'countrycodes': 've'}
+    )
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'SemilleroComunal/1.2'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            results = json.loads(resp.read())
+        if results:
+            lat = float(results[0]['lat'])
+            lng = float(results[0]['lon'])
+            upd = get_db()
+            upd.execute("UPDATE beneficiarios SET lat=?, lng=? WHERE id=?", (lat, lng, bid))
+            upd.commit(); upd.close()
+            return jsonify({"ok": True, "lat": lat, "lng": lng,
+                            "address": results[0].get('display_name', ''), "query": query})
+        else:
+            return jsonify({"error": f"No se encontró ubicación para: {query}"}), 404
+    except Exception as e:
+        return jsonify({"error": f"Error de geocodificación: {str(e)}"}), 500
+
+# 🆕 GEOCODIFICAR TODOS los beneficiarios sin coordenadas
+@app.route('/api/beneficiarios/geocodificar_todos', methods=['POST'])
+@login_required
+def geocodificar_todos():
+    import urllib.request, urllib.parse, time
+    conn = get_db()
+    # Beneficiarios sin coordenadas válidas (lat/lng == 0 o NULL o coordenada por defecto)
+    bens = conn.execute(
+        "SELECT * FROM beneficiarios WHERE activo=1 AND (lat IS NULL OR lng IS NULL OR (lat=8.623 AND lng=-71.651))"
+    ).fetchall()
+    cfg_ciudad = conn.execute("SELECT valor FROM config_sistema WHERE clave='ciudad'").fetchone()
+    conn.close()
+    ciudad = cfg_ciudad['valor'] if cfg_ciudad else ''
+
+    resultados = []
+    for b in bens:
+        b = dict(b)
+        direccion = (b.get('direccion_real') or b.get('direccion') or '').strip()
+        sector    = (b.get('sector') or '').strip()
+        partes = [p for p in [direccion, sector, ciudad, 'Venezuela'] if p]
+        query  = ', '.join(partes)
+
+        url = 'https://nominatim.openstreetmap.org/search?' + urllib.parse.urlencode(
+            {'q': query, 'format': 'json', 'limit': 1, 'countrycodes': 've'}
+        )
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'SemilleroComunal/1.2'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                results = json.loads(resp.read())
+            if results:
+                lat = float(results[0]['lat'])
+                lng = float(results[0]['lon'])
+                upd = get_db()
+                upd.execute("UPDATE beneficiarios SET lat=?, lng=? WHERE id=?", (lat, lng, b['id']))
+                upd.commit(); upd.close()
+                resultados.append({"id": b['id'], "nombre": b['nombres']+' '+b['apellidos'],
+                                   "ok": True, "lat": lat, "lng": lng})
+            else:
+                resultados.append({"id": b['id'], "nombre": b['nombres']+' '+b['apellidos'],
+                                   "ok": False, "error": "Dirección no encontrada"})
+        except Exception as e:
+            resultados.append({"id": b['id'], "nombre": b['nombres']+' '+b['apellidos'],
+                               "ok": False, "error": str(e)})
+        time.sleep(1.1)  # Respetar límite de Nominatim: 1 req/seg
+
+    encontrados = sum(1 for r in resultados if r['ok'])
+    return jsonify({"ok": True, "total": len(resultados), "encontrados": encontrados,
+                   "resultados": resultados})
 
 @app.route('/api/beneficiarios/<int:bid>/actualizar', methods=['POST'])
 @login_required
@@ -744,29 +884,64 @@ def actualizar_ubicacion(bid):
 @app.route('/api/beneficiarios/nuevo', methods=['POST'])
 @login_required
 def nuevo_beneficiario():
-    d=request.json
-    conn=get_db()
-    c=conn.cursor()
-    ultimo=c.execute("SELECT contrato FROM beneficiarios ORDER BY id DESC LIMIT 1").fetchone()
-    num=int(ultimo['contrato'].split('-')[1])+1 if ultimo else 1
-    año=date.today().year
-    contrato=f"BCCPPO-{num:02d}-{año}"
-    mun=get_cfg('municipio') or ''
-    coords=MUNICIPIOS_COORDS.get(mun,[8.623,-71.651])
-    
-    c.execute("""INSERT INTO beneficiarios(contrato,nombres,apellidos,cedula,rif,direccion,sector,lat,lng,
-    estado_civil,fecha_nacimiento,actividad,fecha_desembolso,rif_vencimiento)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-    (contrato,d['nombres'],d['apellidos'],d['cedula'],d['rif'],d.get('direccion',''),d.get('sector',''),
-    d.get('lat',coords[0]),d.get('lng',coords[1]),d.get('estado_civil',''),d.get('fecha_nacimiento',''),
-    d.get('actividad',''),d.get('fecha_desembolso',date.today().strftime('%d/%m/%Y')),d.get('rif_vencimiento','')))
-    
-    nid=c.lastrowid
-    c.execute("INSERT INTO movimientos_banco(tipo,concepto,monto_usd,fecha,referencia,beneficiario_id) VALUES('EGRESO',?,400,?,?,?)",
-    (f"Desembolso {contrato}", d.get('fecha_desembolso',date.today().strftime('%d/%m/%Y')),contrato,nid))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok":True, "contrato":contrato, "id":nid})
+    d = request.json
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # ELIMINADO DUPLICADOS POTENCIALES: Si ya existe un beneficiario con esta cédula activo, abortar
+        existe = c.execute("SELECT id FROM beneficiarios WHERE cedula=? AND activo=1", (d.get('cedula'),)).fetchone()
+        if existe:
+            conn.close()
+            return jsonify({"error": f"Ya existe un beneficiario activo con la cédula {d.get('cedula')}"}), 400
+
+        # LÓGICA DE NUMERACIÓN PROFUNDA:
+        # 1. Buscamos el número más alto entre los beneficiarios ACTIVOS
+        activos = c.execute("SELECT contrato FROM beneficiarios WHERE activo=1").fetchall()
+        max_num = 0
+        for row in activos:
+            try:
+                partes = row['contrato'].split('-')
+                if len(partes) >= 2:
+                    n = int(partes[1])
+                    if n > max_num: max_num = n
+            except: pass
+        
+        num = max_num + 1
+        año = date.today().year
+        contrato = f"BCCPPO-{num:02d}-{año}"
+        
+        # 2. LIMPIEZA: Si existe un registro INACTIVO con el mismo número de contrato, lo eliminamos 
+        # (ya que el usuario quiere reutilizar números de registros que borró por error)
+        c.execute("DELETE FROM beneficiarios WHERE contrato=? AND activo=0", (contrato,))
+        
+        mun = get_cfg('municipio') or ''
+        coords = MUNICIPIOS_COORDS.get(mun, [8.623, -71.651])
+        
+        lat = d.get('lat')
+        lng = d.get('lng')
+        if not lat or str(lat).strip() == "" or not lng or str(lng).strip() == "":
+            lat, lng = coords[0], coords[1]
+        
+        c.execute("""INSERT INTO beneficiarios(contrato,nombres,apellidos,cedula,rif,direccion,sector,lat,lng,
+        estado_civil,fecha_nacimiento,actividad,fecha_desembolso,rif_vencimiento)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (contrato, d.get('nombres','').strip(), d.get('apellidos','').strip(), d.get('cedula','').strip(), 
+         d.get('rif','').strip(), d.get('direccion','').strip(), d.get('sector','').strip(),
+         lat, lng, d.get('estado_civil',''), d.get('fecha_nacimiento',''),
+         d.get('actividad',''), d.get('fecha_desembolso', date.today().strftime('%d/%m/%Y')), d.get('rif_vencimiento','')))
+        
+        nid = c.lastrowid
+        c.execute("INSERT INTO movimientos_banco(tipo,concepto,monto_usd,fecha,referencia,beneficiario_id) VALUES('EGRESO',?,400,?,?,?)",
+        (f"Desembolso {contrato}", d.get('fecha_desembolso', date.today().strftime('%d/%m/%Y')), contrato, nid))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Beneficiario creado: {contrato} ID:{nid}")
+        return jsonify({"ok": True, "contrato": contrato, "id": nid})
+    except Exception as e:
+        logger.error(f"Error crítico en nuevo_beneficiario: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # --- PAGOS Y BANCO ---
 
@@ -847,7 +1022,7 @@ def eliminar_foto(fid):
     conn.close()
     return jsonify({"ok":True})
 
-# --- OCR CON GEMINI ---
+# --- OCR MULTI-PROVEEDOR Y CONCILIACIÓN BANCARIA ---
 
 def get_gemini():
     import google.generativeai as genai
@@ -856,18 +1031,262 @@ def get_gemini():
     genai.configure(api_key=ak)
     return genai.GenerativeModel('gemini-2.5-flash'), None
 
+def call_groq_vision(image_b64, prompt):
+    import urllib.request
+    import json
+    
+    g_key = get_cfg('groq_api_key')
+    if not g_key:
+        raise ValueError("Groq API Key no configurada")
+        
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {g_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "llama-3.2-11b-vision-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.1,
+        "response_format": {
+            "type": "json_object"
+        }
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            res_body = response.read().decode('utf-8')
+            res_json = json.loads(res_body)
+            content = res_json['choices'][0]['message']['content']
+            return content
+    except Exception as e:
+        logger.error(f"Groq Vision API error: {e}")
+        raise
+
+def process_ocr_pago(image_b64):
+    pref = get_cfg('api_preferida') or 'gemini'
+    prompt = 'Analiza este comprobante de pago bancario venezolano. Extrae la informacion y responde estrictamente en un objeto JSON sin formato adicional con las siguientes claves: {"monto_bs": "", "monto_usd": "", "fecha": "DD/MM/AAAA", "numero_operacion": "", "banco_origen": "", "tasa_bcv": ""}. Trata de limpiar caracteres no numericos en el monto (ej. extraer 20800.00 en vez de Bs. 20.800).'
+    
+    errors = []
+    if pref == 'groq':
+        try:
+            res_text = call_groq_vision(image_b64, prompt)
+            return json.loads(res_text)
+        except Exception as e:
+            errors.append(f"Groq error: {e}")
+            logger.warning(f"OCR Pago: Groq falló, intentando Gemini. Error: {e}")
+            try:
+                model, err = get_gemini()
+                if not err:
+                    r = model.generate_content([
+                        {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                        {"text": prompt}
+                    ])
+                    text = r.text.replace('```json','').replace('```','').strip()
+                    return json.loads(text)
+                else:
+                    errors.append(f"Gemini init error: {err}")
+            except Exception as e2:
+                errors.append(f"Gemini failover error: {e2}")
+    else:
+        try:
+            model, err = get_gemini()
+            if err: raise ValueError(err)
+            r = model.generate_content([
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                {"text": prompt}
+            ])
+            text = r.text.replace('```json','').replace('```','').strip()
+            return json.loads(text)
+        except Exception as e:
+            errors.append(f"Gemini error: {e}")
+            logger.warning(f"OCR Pago: Gemini falló, intentando Groq. Error: {e}")
+            try:
+                res_text = call_groq_vision(image_b64, prompt)
+                return json.loads(res_text)
+            except Exception as e2:
+                errors.append(f"Groq failover error: {e2}")
+                
+    raise ValueError(f"Ambos proveedores de OCR fallaron. Detalles: {', '.join(errors)}")
+
+def process_ocr_docs(cedula_b64, rif_b64):
+    pref = get_cfg('api_preferida') or 'gemini'
+    prompt = 'Analiza estos documentos de identidad venezolanos (Cédula de Identidad y/o RIF). Extrae los datos y responde estrictamente en un objeto JSON sin formato adicional con las siguientes claves: {"nombres": "", "apellidos": "", "cedula": "V-X.XXX.XXX", "rif": "VXXXXXXXXX", "estado_civil": "", "fecha_nacimiento": "DD/MM/AAAA", "rif_vencimiento": "DD/MM/AAAA", "direccion": ""}'
+    
+    errors = []
+    img_b64 = cedula_b64 or rif_b64
+    
+    if pref == 'groq':
+        try:
+            res_text = call_groq_vision(img_b64, prompt)
+            return json.loads(res_text)
+        except Exception as e:
+            errors.append(f"Groq error: {e}")
+            logger.warning(f"OCR Docs: Groq falló, intentando Gemini. Error: {e}")
+            try:
+                model, err = get_gemini()
+                if not err:
+                    parts = []
+                    if cedula_b64: parts.append({"inline_data": {"mime_type": "image/jpeg", "data": cedula_b64}})
+                    if rif_b64: parts.append({"inline_data": {"mime_type": "image/jpeg", "data": rif_b64}})
+                    parts.append({"text": prompt})
+                    r = model.generate_content(parts)
+                    text = r.text.replace('```json','').replace('```','').strip()
+                    return json.loads(text)
+                else:
+                    errors.append(f"Gemini init error: {err}")
+            except Exception as e2:
+                errors.append(f"Gemini failover error: {e2}")
+    else:
+        try:
+            model, err = get_gemini()
+            if err: raise ValueError(err)
+            parts = []
+            if cedula_b64: parts.append({"inline_data": {"mime_type": "image/jpeg", "data": cedula_b64}})
+            if rif_b64: parts.append({"inline_data": {"mime_type": "image/jpeg", "data": rif_b64}})
+            parts.append({"text": prompt})
+            r = model.generate_content(parts)
+            text = r.text.replace('```json','').replace('```','').strip()
+            return json.loads(text)
+        except Exception as e:
+            errors.append(f"Gemini error: {e}")
+            logger.warning(f"OCR Docs: Gemini falló, intentando Groq. Error: {e}")
+            try:
+                res_text = call_groq_vision(img_b64, prompt)
+                return json.loads(res_text)
+            except Exception as e2:
+                errors.append(f"Groq failover error: {e2}")
+                
+    raise ValueError(f"Ambos proveedores de OCR fallaron. Detalles: {', '.join(errors)}")
+
+def process_ocr_estado(image_b64):
+    pref = get_cfg('api_preferida') or 'gemini'
+    prompt = 'Analiza este capture de estado de cuenta bancario venezolano. Extrae la lista de transacciones y responde estrictamente en un objeto JSON con una única clave "transacciones" que contenga una lista de objetos. Cada objeto debe tener los siguientes campos: {"fecha": "DD/MM/AAAA", "referencia": "", "descripcion": "", "codigo": "NC o ND", "debito": 0.0, "credito": 0.0, "saldo": 0.0}. Limpia los montos para que sean números flotantes puros (sin símbolos de moneda ni separadores de miles).'
+    
+    errors = []
+    if pref == 'groq':
+        try:
+            res_text = call_groq_vision(image_b64, prompt)
+            return json.loads(res_text)
+        except Exception as e:
+            errors.append(f"Groq error: {e}")
+            logger.warning(f"OCR Estado: Groq falló, intentando Gemini. Error: {e}")
+            try:
+                model, err = get_gemini()
+                if not err:
+                    r = model.generate_content([
+                        {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                        {"text": prompt}
+                    ])
+                    text = r.text.replace('```json','').replace('```','').strip()
+                    return json.loads(text)
+            except Exception as e2:
+                errors.append(f"Gemini failover error: {e2}")
+    else:
+        try:
+            model, err = get_gemini()
+            if err: raise ValueError(err)
+            r = model.generate_content([
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                {"text": prompt}
+            ])
+            text = r.text.replace('```json','').replace('```','').strip()
+            return json.loads(text)
+        except Exception as e:
+            errors.append(f"Gemini error: {e}")
+            logger.warning(f"OCR Estado: Gemini falló, intentando Groq. Error: {e}")
+            try:
+                res_text = call_groq_vision(image_b64, prompt)
+                return json.loads(res_text)
+            except Exception as e2:
+                errors.append(f"Groq failover error: {e2}")
+                
+    raise ValueError(f"Ambos proveedores de OCR fallaron para el estado de cuenta. Detalles: {', '.join(errors)}")
+
+def parse_bdt_statement_text(text):
+    import re
+    lines = text.split('\n')
+    transacciones = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        if "referencia" in line.lower() or "saldo" in line.lower() or "estado de cuenta" in line.lower():
+            continue
+            
+        fecha_match = re.match(r'^(\d{2}[/-]\d{2}[/-]\d{4})', line)
+        if not fecha_match:
+            continue
+            
+        fecha = fecha_match.group(1)
+        rest = line[len(fecha):].strip()
+        
+        tokens = [t.strip() for t in re.split(r'\s{2,}', rest) if t.strip()]
+        if len(tokens) < 3:
+            tokens = [t.strip() for t in rest.split(' ') if t.strip()]
+            
+        if len(tokens) >= 3:
+            referencia = tokens[0]
+            codigo = tokens[1] if len(tokens[1]) <= 3 else ""
+            
+            def parse_monto(val):
+                if not val or val in ('0', '0,00', '0.00', '-'): 
+                    return 0.0
+                val_clean = val.replace('.', '').replace(',', '.')
+                try:
+                    return float(val_clean)
+                except:
+                    val_clean = re.sub(r'[^\d.]', '', val.replace(',', '.'))
+                    try: return float(val_clean)
+                    except: return 0.0
+            
+            saldo = parse_monto(tokens[-1])
+            credito = parse_monto(tokens[-2])
+            debito = parse_monto(tokens[-3])
+            
+            desc_start = 2 if codigo else 1
+            desc_tokens = tokens[desc_start:-3]
+            descripcion = " ".join(desc_tokens) if desc_tokens else "TRANSFERENCIA"
+            
+            transacciones.append({
+                "fecha": fecha,
+                "referencia": referencia,
+                "descripcion": descripcion,
+                "codigo": codigo,
+                "debito": debito,
+                "credito": credito,
+                "saldo": saldo
+            })
+            
+    return transacciones
+
 @app.route('/api/ocr', methods=['POST'])
 @login_required
 def ocr_docs():
-    model,err=get_gemini()
-    if err: return jsonify({"error":err}),400
     try:
-        parts=[]
-        if request.json.get('cedula_b64'): parts.append({"inline_data":{"mime_type":"image/jpeg","data":request.json['cedula_b64']}})
-        if request.json.get('rif_b64'): parts.append({"inline_data":{"mime_type":"image/jpeg","data":request.json['rif_b64']}})
-        parts.append({"text":'Analiza estos documentos venezolanos. Responde SOLO en JSON puro:\n{"nombres": "", "apellidos": "", "cedula": "V-X.XXX.XXX", "rif": "VXXXXXXXXX", "estado_civil": "", "fecha_nacimiento": "DD/MM/AAAA", "rif_vencimiento": "DD/MM/AAAA", "direccion": ""}'})
-        r=model.generate_content(parts)
-        return jsonify(json.loads(r.text.replace('```json','').replace('```','').strip()))
+        cedula_b64 = request.json.get('cedula_b64')
+        rif_b64 = request.json.get('rif_b64')
+        res = process_ocr_docs(cedula_b64, rif_b64)
+        return jsonify(res)
     except Exception as e:
         logger.error(f"OCR docs error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -875,14 +1294,411 @@ def ocr_docs():
 @app.route('/api/ocr/pago', methods=['POST'])
 @login_required
 def ocr_pago():
-    model,err=get_gemini()
-    if err: return jsonify({"error":err}),400
     try:
-        r=model.generate_content([{"inline_data":{"mime_type":"image/jpeg","data":request.json['imagen_b64']}},
-        {"text":'Analiza este comprobante venezolano. SOLO JSON:\n{"monto_bs": "", "monto_usd": "", "fecha": "DD/MM/AAAA", "numero_operacion": "", "banco_origen": "", "tasa_bcv": ""}'}])
-        return jsonify(json.loads(r.text.replace('```json','').replace('```','').strip()))
+        img_b64 = request.json.get('imagen_b64')
+        if not img_b64: return jsonify({"error": "No se proporcionó imagen"}), 400
+        res = process_ocr_pago(img_b64)
+        return jsonify(res)
     except Exception as e:
         logger.error(f"OCR pago error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/conciliacion/subir_estado', methods=['POST'])
+@login_required
+def subir_estado_cuenta():
+    d = request.json or {}
+    text_data = d.get('texto')
+    image_b64 = d.get('imagen_b64')
+    
+    transacciones = []
+    try:
+        if text_data:
+            transacciones = parse_bdt_statement_text(text_data)
+        elif image_b64:
+            res = process_ocr_estado(image_b64)
+            transacciones = res.get('transacciones', [])
+        else:
+            return jsonify({"error": "No se proporcionó texto ni imagen del estado de cuenta"}), 400
+            
+        conn = get_db()
+        c = conn.cursor()
+        
+        insertadas = 0
+        duplicadas = 0
+        
+        for tx in transacciones:
+            fecha = tx.get('fecha')
+            referencia = tx.get('referencia')
+            descripcion = tx.get('descripcion', '')
+            codigo = tx.get('codigo', '')
+            debito = tx.get('debito', 0.0)
+            credito = tx.get('credito', 0.0)
+            saldo = tx.get('saldo', 0.0)
+            
+            if not referencia or not fecha:
+                continue
+                
+            try:
+                c.execute("""INSERT INTO transacciones_banco
+                (fecha, referencia, descripcion, codigo, debito, credito, saldo, reconciliado)
+                VALUES(?,?,?,?,?,?,?,0)""",
+                (fecha, referencia, descripcion, codigo, debito, credito, saldo))
+                insertadas += 1
+            except sqlite3.IntegrityError:
+                duplicadas += 1
+                
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "ok": True,
+            "mensaje": f"Se procesaron {len(transacciones)} transacciones. Insertadas: {insertadas}, Duplicadas (omitidas): {duplicadas}",
+            "transacciones_procesadas": len(transacciones),
+            "insertadas": insertadas,
+            "duplicadas": duplicadas
+        })
+    except Exception as e:
+        logger.error(f"Error al subir estado de cuenta: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/conciliacion/ejecutar', methods=['POST'])
+@login_required
+def ejecutar_conciliacion():
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        pagos = conn.execute("SELECT id, contrato, numero_cuota, monto_bs, numero_operacion, fecha_pago FROM pagos WHERE conciliado=0").fetchall()
+        bancos = conn.execute("SELECT id, fecha, referencia, descripcion, credito FROM transacciones_banco WHERE reconciliado=0 AND credito > 0").fetchall()
+        
+        emparejados = 0
+        for p in pagos:
+            p_id = p['id']
+            p_ref = str(p['numero_operacion'] or '').strip()
+            p_monto = p['monto_bs'] or 0.0
+            
+            if not p_ref or p_monto == 0:
+                continue
+                
+            match_encontrado = None
+            for b in bancos:
+                b_id = b['id']
+                b_ref = str(b['referencia'] or '').strip()
+                b_monto = b['credito'] or 0.0
+                
+                # Tolerancia de variación de monto de 100 Bs
+                if abs(p_monto - b_monto) <= 100.0:
+                    match_refs = False
+                    if p_ref == b_ref:
+                        match_refs = True
+                    elif len(p_ref) >= 6 and len(b_ref) >= 6:
+                        if p_ref.endswith(b_ref) or b_ref.endswith(p_ref):
+                            match_refs = True
+                            
+                    if match_refs:
+                        match_encontrado = b
+                        break
+            
+            if match_encontrado:
+                b_id = match_encontrado['id']
+                b_ref = match_encontrado['referencia']
+                
+                c.execute("UPDATE pagos SET conciliado=1, banco_id_referencia=? WHERE id=?", (b_ref, p_id))
+                c.execute("UPDATE transacciones_banco SET reconciliado=1, pago_id=? WHERE id=?", (p_id, b_id))
+                emparejados += 1
+                bancos = [x for x in bancos if x['id'] != b_id]
+                
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "ok": True,
+            "mensaje": f"Conciliación finalizada. Se auto-conciliaron {emparejados} pagos con sus transacciones bancarias.",
+            "emparejados": emparejados
+        })
+    except Exception as e:
+        logger.error(f"Error en ejecución de conciliación: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/conciliacion/manual', methods=['POST'])
+@login_required
+def conciliacion_manual():
+    d = request.json or {}
+    pago_id = d.get('pago_id')
+    transaccion_id = d.get('transaccion_id')
+    
+    if not pago_id or not transaccion_id:
+        return jsonify({"error": "Faltan IDs de pago o transacción"}), 400
+        
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        pago = conn.execute("SELECT * FROM pagos WHERE id=?", (pago_id,)).fetchone()
+        if not pago:
+            conn.close()
+            return jsonify({"error": "Pago no encontrado"}), 404
+            
+        tx = conn.execute("SELECT * FROM transacciones_banco WHERE id=?", (transaccion_id,)).fetchone()
+        if not tx:
+            conn.close()
+            return jsonify({"error": "Transacción bancaria no encontrada"}), 404
+            
+        if pago['banco_id_referencia']:
+            c.execute("UPDATE transacciones_banco SET reconciliado=0, pago_id=NULL WHERE referencia=?", (pago['banco_id_referencia'],))
+        if tx['pago_id']:
+            c.execute("UPDATE pagos SET conciliado=0, banco_id_referencia=NULL WHERE id=?", (tx['pago_id'],))
+            
+        c.execute("UPDATE pagos SET conciliado=2, banco_id_referencia=? WHERE id=?", (tx['referencia'], pago_id))
+        c.execute("UPDATE transacciones_banco SET reconciliado=2, pago_id=? WHERE id=?", (pago_id, transaccion_id))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "mensaje": "Conciliación manual realizada exitosamente."})
+    except Exception as e:
+        logger.error(f"Error en conciliación manual: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/conciliacion/estado', methods=['GET'])
+@login_required
+def estado_conciliacion():
+    try:
+        conn = get_db()
+        txs = conn.execute("SELECT * FROM transacciones_banco ORDER BY fecha DESC, id DESC").fetchall()
+        pagos = conn.execute("""
+            SELECT p.*, b.nombres, b.apellidos 
+            FROM pagos p 
+            JOIN beneficiarios b ON p.beneficiario_id = b.id 
+            ORDER BY p.fecha_pago DESC, p.id DESC
+        """).fetchall()
+        conn.close()
+        return jsonify({
+            "transacciones": [dict(x) for x in txs],
+            "pagos": [dict(x) for x in pagos]
+        })
+    except Exception as e:
+        logger.error(f"Error al obtener estado de conciliación: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/pagos/cuadro_resumen', methods=['GET'])
+@login_required
+def cuadro_resumen():
+    try:
+        conn = get_db()
+        beneficiarios = conn.execute("SELECT id, contrato, nombres, apellidos, cedula FROM beneficiarios WHERE activo=1 ORDER BY contrato").fetchall()
+        pagos = conn.execute("SELECT id, beneficiario_id, numero_cuota, monto_bs, monto_usd, fecha_pago, numero_operacion, banco_origen, conciliado FROM pagos").fetchall()
+        conn.close()
+        
+        pagos_map = {}
+        for p in pagos:
+            b_id = p['beneficiario_id']
+            cuota = p['numero_cuota']
+            if b_id not in pagos_map:
+                pagos_map[b_id] = {}
+            pagos_map[b_id][cuota] = dict(p)
+            
+        matriz = []
+        for b in beneficiarios:
+            b_id = b['id']
+            cuotas_info = {}
+            for c_num in range(1, 12):
+                pago_cuota = pagos_map.get(b_id, {}).get(c_num)
+                if pago_cuota:
+                    status = "pendiente"
+                    if pago_cuota['conciliado'] == 1:
+                        status = "conciliado_auto"
+                    elif pago_cuota['conciliado'] == 2:
+                        status = "conciliado_manual"
+                    else:
+                        status = "registrado"
+                        
+                    cuotas_info[str(c_num)] = {
+                        "status": status,
+                        "monto_bs": pago_cuota['monto_bs'],
+                        "monto_usd": pago_cuota['monto_usd'],
+                        "fecha": pago_cuota['fecha_pago'],
+                        "referencia": pago_cuota['numero_operacion'],
+                        "banco": pago_cuota['banco_origen']
+                    }
+                else:
+                    cuotas_info[str(c_num)] = {
+                        "status": "pendiente",
+                        "monto_bs": 0,
+                        "monto_usd": 0,
+                        "fecha": "",
+                        "referencia": "",
+                        "banco": ""
+                    }
+            matriz.append({
+                "beneficiario_id": b_id,
+                "contrato": b['contrato'],
+                "nombres": b['nombres'],
+                "apellidos": b['apellidos'],
+                "cedula": b['cedula'],
+                "cuotas": cuotas_info
+            })
+        return jsonify(matriz)
+    except Exception as e:
+        logger.error(f"Error en cuadro_resumen: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/pagos/informe_pdf', methods=['GET'])
+@login_required
+def generar_reporte_pdf():
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        
+        conn = get_db()
+        beneficiarios = conn.execute("SELECT id, contrato, nombres, apellidos, cedula FROM beneficiarios WHERE activo=1 ORDER BY contrato").fetchall()
+        pagos = conn.execute("SELECT id, beneficiario_id, numero_cuota, monto_bs, monto_usd, fecha_pago, numero_operacion, banco_origen, conciliado FROM pagos").fetchall()
+        txs = conn.execute("SELECT id, fecha, referencia, descripcion, credito, reconciliado FROM transacciones_banco WHERE credito > 0").fetchall()
+        conn.close()
+        
+        total_beneficiarios = len(beneficiarios)
+        total_pagos_reg = len(pagos)
+        pagos_conciliados = sum(1 for p in pagos if p['conciliado'] > 0)
+        pagos_pendientes = total_pagos_reg - pagos_conciliados
+        monto_total_bs = sum(p['monto_bs'] or 0.0 for p in pagos)
+        monto_conciliado_bs = sum(p['monto_bs'] or 0.0 for p in pagos if p['conciliado'] > 0)
+        
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+        story = []
+        
+        styles = getSampleStyleSheet()
+        
+        title_style = ParagraphStyle(
+            'ComunalTitle',
+            parent=styles['Heading1'],
+            fontName='Helvetica-Bold',
+            fontSize=20,
+            textColor=colors.HexColor('#0C447C'),
+            spaceAfter=15,
+            alignment=1
+        )
+        
+        subtitle_style = ParagraphStyle(
+            'ComunalSubTitle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Oblique',
+            fontSize=10,
+            textColor=colors.HexColor('#555555'),
+            spaceAfter=20,
+            alignment=1
+        )
+        
+        h2_style = ParagraphStyle(
+            'ComunalH2',
+            parent=styles['Heading2'],
+            fontName='Helvetica-Bold',
+            fontSize=13,
+            textColor=colors.HexColor('#0F6E56'),
+            spaceBefore=12,
+            spaceAfter=8
+        )
+        
+        body_style = ParagraphStyle(
+            'ComunalBody',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=9,
+            textColor=colors.HexColor('#333333'),
+            spaceAfter=8
+        )
+        
+        story.append(Paragraph("BANCO COMUNAL MANUELA SÁENZ 5", title_style))
+        story.append(Paragraph("Informe de Conciliación Bancaria y Registro de Pagos - Semillero Comunal", subtitle_style))
+        
+        story.append(Paragraph("Resumen Ejecutivo", h2_style))
+        
+        porcentaje_conciliado = (pagos_conciliados / total_pagos_reg * 100) if total_pagos_reg else 0.0
+        data_resumen = [
+            [Paragraph("<b>Indicador</b>", body_style), Paragraph("<b>Valor</b>", body_style)],
+            [Paragraph("Beneficiarios Activos", body_style), Paragraph(str(total_beneficiarios), body_style)],
+            [Paragraph("Total Pagos Registrados", body_style), Paragraph(str(total_pagos_reg), body_style)],
+            [Paragraph("Pagos Conciliados con Banco", body_style), Paragraph(f"{pagos_conciliados} ({porcentaje_conciliado:.1f}%)", body_style)],
+            [Paragraph("Pagos Pendientes de Conciliación", body_style), Paragraph(str(pagos_pendientes), body_style)],
+            [Paragraph("Monto Total Recibido (Bs.)", body_style), Paragraph(f"{monto_total_bs:,.2f} Bs.", body_style)],
+            [Paragraph("Monto Conciliado en Banco (Bs.)", body_style), Paragraph(f"{monto_conciliado_bs:,.2f} Bs.", body_style)]
+        ]
+        
+        t_resumen = Table(data_resumen, colWidths=[250, 250])
+        t_resumen.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECEFF1')),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CFD8DC')),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+            ('TOPPADDING', (0,0), (-1,-1), 5),
+        ]))
+        story.append(t_resumen)
+        story.append(Spacer(1, 15))
+        
+        story.append(Paragraph("Cuadro de Pagos por Beneficiario", h2_style))
+        
+        pagos_map_count = {}
+        for p in pagos:
+            b_id = p['beneficiario_id']
+            if b_id not in pagos_map_count:
+                pagos_map_count[b_id] = 0
+            if p['conciliado'] > 0:
+                pagos_map_count[b_id] += 1
+                
+        data_beneficiarios = [
+            [
+                Paragraph("<b>Contrato</b>", body_style),
+                Paragraph("<b>Cédula</b>", body_style),
+                Paragraph("<b>Nombre Completo</b>", body_style),
+                Paragraph("<b>Cuotas Conciliadas</b>", body_style),
+                Paragraph("<b>Total Conciliado (Bs.)</b>", body_style)
+            ]
+        ]
+        
+        for b in beneficiarios:
+            b_id = b['id']
+            cuotas_pagadas_conc = pagos_map_count.get(b_id, 0)
+            monto_beneficiario = sum(p['monto_bs'] or 0.0 for p in pagos if p['beneficiario_id'] == b_id and p['conciliado'] > 0)
+            
+            data_beneficiarios.append([
+                Paragraph(b['contrato'], body_style),
+                Paragraph(b['cedula'], body_style),
+                Paragraph(f"{b['nombres']} {b['apellidos']}", body_style),
+                Paragraph(f"{cuotas_pagadas_conc} / 11", body_style),
+                Paragraph(f"{monto_beneficiario:,.2f} Bs.", body_style)
+            ])
+            
+        t_benef = Table(data_beneficiarios, colWidths=[100, 80, 180, 100, 110])
+        t_benef.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0C447C')),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#B0BEC5')),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+        ]))
+        
+        for col_idx in range(5):
+            t_benef.setStyle(TableStyle([('TEXTCOLOR', (col_idx, 0), (col_idx, 0), colors.white)]))
+            
+        story.append(t_benef)
+        story.append(Spacer(1, 15))
+        
+        story.append(Paragraph(f"Reporte generado el: {datetime.now().strftime('%d/%m/%Y %I:%M %p')}", subtitle_style))
+        
+        doc.build(story)
+        buffer.seek(0)
+        
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name=f"Reporte_Conciliacion_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mimetype="application/pdf"
+        )
+    except Exception as e:
+        logger.error(f"Error al generar reporte PDF: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- CONTRATOS ---
@@ -1064,10 +1880,10 @@ if __name__ == '__main__':
     threading.Thread(target=abrir,daemon=True).start()
     
     print("\n"+"= "*52)
-    print("  SemilleroComunal v2.1 (Con Eliminar y Mapa Fix)")
+    print("  SemilleroComunal v2.3 (CACHE-FIX)")
     print("  Listo para usar")
     print("= "*52)
     print("  Navegador: http://localhost:5000")
     print("= "*52+"\n")
     
-    app.run(debug=False,port=5000,host='127.0.0.1')
+    app.run(debug=True, use_reloader=False, port=5000, host='127.0.0.1')

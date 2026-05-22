@@ -83,6 +83,7 @@ tr:hover td{background:#f8fafc}
   <button class="ni active" onclick="sp('dashboard',this)"><span class="ni-ico">📊</span>Dashboard</button>
   <button class="ni" onclick="sp('beneficiarios',this)"><span class="ni-ico">👥</span>Beneficiarios</button>
   <button class="ni" onclick="sp('pagos',this)"><span class="ni-ico">💰</span>Registrar Pagos</button>
+  <button class="ni" onclick="sp('conciliacion',this)"><span class="ni-ico">⚖️</span>Conciliación y Resumen</button>
   <div class="ns">Gestión</div>
   <button class="ni" onclick="sp('mapa',this)"><span class="ni-ico">🗺️</span>Mapa</button>
   <button class="ni" onclick="sp('historias',this)"><span class="ni-ico">📖</span>Historias</button>
@@ -98,13 +99,13 @@ tr:hover td{background:#f8fafc}
   <div class="fc">
     <strong style="color:rgba(255,255,255,0.65)">Enrique Maduro</strong><br>
     Comuna Productiva Presidente Obrero<br>
-    Hecho con Claude AI 🤖<br>v1.2 — 2026
+    Hecho con Claude AI 🤖<br>v2.3 — 2026<br><span style="color:#9FE1CB">📍 DASHBOARD_FIX_LOADED</span>
   </div>
 </div>
 
 <div class="main">
   <div class="topbar">
-    <div><h1 id="tb-h1">Banco de la Comuna <span style="background:#0F6E56;color:white;padding:2px 8px;border-radius:4px;font-size:10px">v2.2 SINCRONIZADO</span></h1><div class="sub" id="tb-sub">Cargando...</div></div>
+    <div><h1 id="tb-h1">Banco de la Comuna <span style="background:#d97706;color:white;padding:2px 8px;border-radius:4px;font-size:10px">v2.3 CACHE-FIXED</span></h1><div class="sub" id="tb-sub">Cargando...</div></div>
     <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:#64748b">
       <span id="tb-fecha"></span><span class="ub" id="tb-usr">👤</span>
     </div>
@@ -185,6 +186,50 @@ tr:hover td{background:#f8fafc}
           <div class="fg"><label>Banco origen</label><input type="text" id="pbco"></div>
         </div>
         <button class="btn bs" style="width:100%" onclick="confirmarPago()">✓ Confirmar y registrar</button>
+      </div>
+    </div>
+
+    <!-- CONCILIACIÓN Y RESUMEN -->
+    <div class="page" id="page-conciliacion">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="color:#0C447C;font-size:15px">Conciliación y Resumen de Pagos</h2>
+        <button class="btn bp" onclick="descargarInformePagos()">📄 Descargar Informe PDF</button>
+      </div>
+      <div class="g2">
+        <div class="card">
+          <h3>Subir Estado de Cuenta Bancario</h3>
+          <div class="fg"><label>Texto copiado (desde la web del banco)</label>
+            <textarea id="ce-texto" rows="4" placeholder="Pega el texto aquí..."></textarea>
+          </div>
+          <div class="fg"><label>O captura de pantalla (OCR vía Groq/Gemini)</label>
+            <div class="uz" id="zce" onclick="document.getElementById('ce-img').click()">
+              <div style="font-size:24px">📄</div>
+              <div style="font-size:11px;color:#64748b;margin-top:4px">Clic para subir imagen del estado</div>
+              <img id="ce-preview" class="ip" style="display:none">
+            </div>
+            <input type="file" id="ce-img" accept="image/*" style="display:none" onchange="previewCE(this)">
+          </div>
+          <button class="btn bp" style="width:100%" onclick="subirEstadoCuenta()">Subir y Procesar</button>
+          <div id="ce-res" style="margin-top:8px"></div>
+        </div>
+        <div class="card">
+          <h3>Conciliación</h3>
+          <p style="font-size:11px;color:#64748b;margin-bottom:10px">El sistema emparejará los pagos registrados con los depósitos del estado de cuenta de forma automática comparando Montos y Nro. de Referencia.</p>
+          <button class="btn bs" style="width:100%;margin-bottom:10px" onclick="ejecutarConciliacion()">⚖️ Ejecutar Auto-Conciliación</button>
+          <div id="co-res"></div>
+          <h3 style="margin-top:15px">Transacciones sin conciliar</h3>
+          <button class="btn bp" style="font-size:11px" onclick="loadEstadoConc()">↻ Refrescar vista</button>
+          <div id="co-list" style="max-height:160px;overflow-y:auto;margin-top:10px;font-size:11px;color:#374151"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:12px;overflow-x:auto">
+        <h3>Cuadro Resumen de Pagos</h3>
+        <table style="min-width:900px;text-align:center" id="tb-resumen">
+          <thead>
+            <tr><th style="text-align:left">Beneficiario</th><th>C1</th><th>C2</th><th>C3</th><th>C4</th><th>C5</th><th>C6</th><th>C7</th><th>C8</th><th>C9</th><th>C10</th><th>C11</th></tr>
+          </thead>
+          <tbody id="resumen-body"></tbody>
+        </table>
       </div>
     </div>
 
@@ -556,11 +601,14 @@ function sp(name,btn){
   if(name==='estadisticas') loadEst();
   if(name==='config') loadConfig();
   if(name==='recibos'){loadBenefs();setTimeout(()=>renderRecibo(bdata),400);}
+  if(name==='conciliacion'){loadResumen();loadEstadoConc();}
 }
 
 async function loadDash(){
   const d=await fetch('/api/dashboard').then(r=>r.json());
-  document.getElementById('d-tot').textContent=d.total_beneficiarios;
+  if(!d || typeof d !== 'object') { console.error('Dashboard data invalid'); return; }
+  
+  if(document.getElementById('d-tot')) document.getElementById('d-tot').textContent=d.total_beneficiarios || 0;
   document.getElementById('d-car').textContent='$'+d.cartera_total.toLocaleString();
   document.getElementById('d-cob').textContent='$'+d.monto_cobrado.toLocaleString();
   document.getElementById('d-sal').textContent='$'+d.saldo_pendiente.toLocaleString();
@@ -571,22 +619,27 @@ async function loadDash(){
   document.getElementById('tf').style.width=d.porcentaje_recuperacion+'%';
   document.getElementById('d-pct2').textContent=d.porcentaje_recuperacion+'%';
   document.getElementById('d-car2').textContent='$'+d.cartera_total.toLocaleString();
-  document.getElementById('up-body').innerHTML=d.ultimos_pagos.length?
-    d.ultimos_pagos.map(p=>`<tr><td>${p.fecha_pago||'—'}</td><td style="font-size:10px">${p.nombre}</td><td>${p.numero_cuota}</td><td>$${p.monto_usd}</td></tr>`).join(''):
-    '<tr><td colspan="4" style="color:#94a3b8">Sin pagos aún</td></tr>';
+  const upBody = document.getElementById('up-body');
+  if(upBody) {
+    upBody.innerHTML=(d.ultimos_pagos && d.ultimos_pagos.length)?
+      d.ultimos_pagos.map(p=>`<tr><td>${p.fecha_pago||'—'}</td><td style="font-size:10px">${p.nombre}</td><td>${p.numero_cuota}</td><td>$${p.monto_usd}</td></tr>`).join(''):
+      '<tr><td colspan="4" style="color:#94a3b8">Sin pagos aún</td></tr>';
+  }
   const hoy=new Date(); let al='';
-  // Blindaje contra undefined en rif_info
+  // Blindaje extremo contra undefined
   if(d.rif_info && Array.isArray(d.rif_info)) {
     d.rif_info.forEach(r=>{
-      if(!r.rif_vencimiento) return;
+      if(!r || !r.rif_vencimiento) return;
       const p=r.rif_vencimiento.split('/');
       let v; try{v=p.length===2?new Date(p[1],p[0]-1,1):new Date(p[2],p[1]-1,p[0]);}catch(e){return;}
+      if(isNaN(v.getTime())) return;
       const dias=Math.floor((v-hoy)/86400000);
       if(dias<0) al+=`<div class="al ar">🔴 RIF vencido: <strong>${r.nombre}</strong> (${r.contrato})</div>`;
       else if(dias<180) al+=`<div class="al aw">🟡 RIF vence pronto: <strong>${r.nombre}</strong> — ${r.rif_vencimiento}</div>`;
     });
   }
-  document.getElementById('al-box').innerHTML=al||'<p style="color:#94a3b8;font-size:12px">✓ Sin alertas</p>';
+  const alBox = document.getElementById('al-box');
+  if(alBox) alBox.innerHTML=al||'<p style="color:#94a3b8;font-size:12px">✓ Sin alertas</p>';
 }
 
 async function loadBenefs(){
@@ -677,11 +730,23 @@ function initMapa(){
   const lat=cfgApp.map_lat||8.623,lng=cfgApp.map_lng||-71.651;
   mapObj=L.map('map').setView([lat,lng],14);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(mapObj);
-  const cols={'La Inmaculada':'#1D9E75','Sur América':'#185FA5','Barrio Bolívar':'#BA7517','La Esperanza':'#993556','Divino Niño':'#534AB7','Los Chaguaramos':'#D85A30','Manuelita Saenz':'#0F6E56'};
+  const cols={
+    'La Inmaculada':'#1D9E75',
+    'Sur América':'#185FA5',
+    'Barrio Bolívar':'#BA7517',
+    'La Esperanza':'#993556',
+    'Divino Niño':'#534AB7',
+    'Los Chaguaramos':'#D85A30',
+    'Manuelita Saenz':'#0F6E56',
+    'Sector Mixto':'#8E44AD',
+    'Otros':'#2980B9'
+  };
   bdata.forEach(b=>{
     if(!b.lat||!b.lng)return;
-    const col=cols[b.sector]||'#888780';
-    const ico=L.divIcon({html:`<div style="width:28px;height:28px;border-radius:50%;background:${col};border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:white;cursor:pointer">${b.id}</div>`,className:'',iconSize:[28,28],iconAnchor:[14,14]});
+    // Color por sector o un azúl premium por defecto si no coincide
+    const col=cols[b.sector]||'#34495E'; 
+    const nro=b.contrato.split('-')[1]||b.id;
+    const ico=L.divIcon({html:`<div style="width:30px;height:30px;border-radius:50%;background:${col};border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:white;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.3)">${nro}</div>`,className:'',iconSize:[30,30],iconAnchor:[15,15]});
     const m=L.marker([b.lat,b.lng],{icon:ico,draggable:false}).addTo(mapObj);
     m.bindPopup(`<div class="map-pin-info">
       <b style="color:#1D9E75">${b.contrato}</b><br>
@@ -880,7 +945,8 @@ async function abrirHist(id,nombre){
         <button class="btn bs" style="width:100%" onclick="guardarHist(${id})">Guardar historia</button>
       </div>
       <div>
-        <div style="font-size:11px;font-weight:600;color:#374151;margin-bottom:7px">Fotos de impacto</div>
+        <div id="sb-cn" style="font-size:12px;font-weight:700;margin-bottom:12px;color:#cbd5e1;text-transform:uppercase">SemilleroComunal</div>
+      <div style="background:#0F6E56;color:white;font-size:10px;padding:4px 8px;border-radius:4px;margin-bottom:15px;display:inline-block">v2.3 CACHE-FIX</div>
         <div class="uz" onclick="document.getElementById('if${id}').click()"><div style="font-size:22px">📸</div><div style="font-size:10px;color:#64748b;margin-top:4px">Agregar foto</div></div>
         <input type="file" id="if${id}" accept="image/*" style="display:none" onchange="subirFoto(${id},this)">
         <div class="fg" style="margin-top:8px"><label>Descripción</label><input type="text" id="fd${id}" placeholder="Ej: Negocio antes del crédito"></div>
@@ -1126,6 +1192,18 @@ function descargarPDF(){window.open('/api/informe/pdf','_blank');}
 function descargarPPTX(){window.open('/api/informe/pptx','_blank');}
 
 // Nuevo beneficiario
+function limpiarFormularioNuevo(btn){
+  ['nn','na','nc','nr','ne','nfn','nd','ns','nact','nfd','nrv'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  document.getElementById('inced').value=''; document.getElementById('inrif').value='';
+  document.getElementById('pnced').src=''; document.getElementById('pnced').style.display='none';
+  document.getElementById('pnrif').src=''; document.getElementById('pnrif').style.display='none';
+  document.getElementById('znced').className='uz'; document.getElementById('znrif').className='uz';
+  nCedB64=null; nRifB64=null;
+  if(btn) btn.disabled=false;
+}
+
 function prevN(tipo,inp){
   const f=inp.files[0];if(!f)return;
   const r=new FileReader();r.onload=e=>{
@@ -1152,16 +1230,36 @@ async function ocrNuevo(){
   }catch(e){alert('Error OCR: '+e.message);}
 }
 async function regNuevo(){
+  const btn = (event && event.target && event.target.tagName === 'BUTTON') ? event.target : null;
+  if(btn) btn.disabled = true;
+  
   const nombres=document.getElementById('nn').value,apellidos=document.getElementById('na').value,cedula=document.getElementById('nc').value;
-  if(!nombres||!apellidos||!cedula){alert('Nombres, apellidos y cédula son obligatorios');return;}
-  const r=await fetch('/api/beneficiarios/nuevo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    nombres,apellidos,cedula,rif:document.getElementById('nr').value,estado_civil:document.getElementById('ne').value,
-    fecha_nacimiento:document.getElementById('nfn').value,direccion:document.getElementById('nd').value,
-    sector:document.getElementById('ns').value,actividad:document.getElementById('nact').value,
-    fecha_desembolso:document.getElementById('nfd').value,rif_vencimiento:document.getElementById('nrv').value
-  })}).then(r=>r.json());
-  if(r.ok){document.getElementById('nr2').innerHTML=`<div style="background:#E1F5EE;color:#085041;padding:9px;border-radius:7px;font-size:12px">✓ Registrado: <strong>${r.contrato}</strong></div>`;loadBenefs();}
-  else document.getElementById('nr2').innerHTML=`<div style="background:#FCEBEB;color:#791F1F;padding:9px;border-radius:7px;font-size:12px">Error: ${r.error}</div>`;
+  if(!nombres||!apellidos||!cedula){
+    alert('Nombres, apellidos y cédula son obligatorios');
+    if(btn) btn.disabled = false;
+    return;
+  }
+  
+  try {
+    const r=await fetch('/api/beneficiarios/nuevo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      nombres,apellidos,cedula,rif:document.getElementById('nr').value,estado_civil:document.getElementById('ne').value,
+      fecha_nacimiento:document.getElementById('nfn').value,direccion:document.getElementById('nd').value,
+      sector:document.getElementById('ns').value,actividad:document.getElementById('nact').value,
+      fecha_desembolso:document.getElementById('nfd').value,rif_vencimiento:document.getElementById('nrv').value
+    })}).then(r=>r.json());
+    
+    if(r.ok){
+      document.getElementById('nr2').innerHTML=`<div style="background:#E1F5EE;color:#085041;padding:9px;border-radius:7px;font-size:12px">✓ Registrado: <strong>${r.contrato}</strong></div>`;
+      limpiarFormularioNuevo(btn);
+      loadBenefs();
+    } else {
+      document.getElementById('nr2').innerHTML=`<div style="background:#FCEBEB;color:#791F1F;padding:9px;border-radius:7px;font-size:12px">Error: ${r.error}</div>`;
+      if(btn) btn.disabled = false;
+    }
+  } catch(e) {
+    document.getElementById('nr2').innerHTML=`<div style="background:#FCEBEB;color:#791F1F;padding:9px;border-radius:7px;font-size:12px">Error de conexión: ${e.message}</div>`;
+    if(btn) btn.disabled = false;
+  }
 }
 
 // Config / Voceras
@@ -1296,6 +1394,89 @@ async function generarRecibo(){
       document.getElementById('recibo-res').innerHTML='<p style="color:#0F6E56;font-size:11px">✓ Recibo descargado</p>';}
     else{const d=await r.json();document.getElementById('recibo-res').innerHTML=`<p style="color:#A32D2D;font-size:11px">Error: ${d.error}</p>`;}
   }catch(e){document.getElementById('recibo-res').innerHTML=`<p style="color:#A32D2D;font-size:11px">Error: ${e.message}</p>`;}
+}
+
+// Conciliación y Resumen
+let ceB64 = null;
+function previewCE(inp){
+  const f=inp.files[0];if(!f)return;
+  const r=new FileReader();r.onload=e=>{
+    ceB64=e.target.result.split(',')[1];
+    document.getElementById('ce-preview').src=e.target.result;
+    document.getElementById('ce-preview').style.display='block';
+    document.getElementById('zce').className='uz filled';
+  };r.readAsDataURL(f);
+}
+async function subirEstadoCuenta() {
+  const text = document.getElementById('ce-texto').value.trim();
+  if (!text && !ceB64) { alert('Ingresa el texto o sube una imagen'); return; }
+  document.getElementById('ce-res').innerHTML='<p style="color:#0C447C;font-size:11px">⏳ Procesando...</p>';
+  try {
+    const r = await fetch('/api/conciliacion/subir_estado', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texto:text,imagen_b64:ceB64})}).then(res=>res.json());
+    if (r.ok) {
+      document.getElementById('ce-res').innerHTML=`<p style="color:#0F6E56;font-size:11px">✓ ${r.mensaje}</p>`;
+      document.getElementById('ce-texto').value='';
+      if(document.getElementById('ce-img')) document.getElementById('ce-img').value='';
+      document.getElementById('ce-preview').style.display='none';
+      document.getElementById('zce').className='uz';
+      ceB64=null;
+      loadEstadoConc();
+    } else {
+      document.getElementById('ce-res').innerHTML=`<p style="color:#A32D2D;font-size:11px">Error: ${r.error}</p>`;
+    }
+  } catch (e) { document.getElementById('ce-res').innerHTML=`<p style="color:#A32D2D;font-size:11px">Error: ${e.message}</p>`; }
+}
+async function ejecutarConciliacion() {
+  document.getElementById('co-res').innerHTML='<p style="color:#0C447C;font-size:11px">⏳ Conciliando pagos...</p>';
+  try {
+    const r = await fetch('/api/conciliacion/ejecutar', {method:'POST'}).then(res=>res.json());
+    if (r.ok) {
+      document.getElementById('co-res').innerHTML=`<p style="color:#0F6E56;font-size:11px">✓ ${r.mensaje}</p>`;
+      loadEstadoConc();
+      loadResumen();
+    } else {
+      document.getElementById('co-res').innerHTML=`<p style="color:#A32D2D;font-size:11px">Error: ${r.error}</p>`;
+    }
+  } catch (e) { document.getElementById('co-res').innerHTML=`<p style="color:#A32D2D;font-size:11px">Error: ${e.message}</p>`; }
+}
+async function loadEstadoConc() {
+  try {
+    const r = await fetch('/api/conciliacion/estado').then(res=>res.json());
+    if (r.error) throw new Error(r.error);
+    const unrecTxs = r.transacciones.filter(t => t.reconciliado === 0 && t.credito > 0);
+    const unrecPagos = r.pagos.filter(p => p.conciliado === 0);
+    let html = `<b>Depósitos sin conciliar (${unrecTxs.length})</b><ul style="padding-left:20px;margin-bottom:10px">`;
+    unrecTxs.slice(0,10).forEach(t => html+=`<li><span style="color:#64748b">${t.fecha}</span> | Ref: <b>${t.referencia}</b> | Bs.${t.credito}</li>`);
+    if(unrecTxs.length>10) html+=`<li>...y ${unrecTxs.length-10} más</li>`;
+    html += `</ul><b>Pagos sin conciliar (${unrecPagos.length})</b><ul style="padding-left:20px">`;
+    unrecPagos.slice(0,10).forEach(p => html+=`<li><span style="color:#64748b">${p.fecha_pago}</span> | Ref: <b>${p.numero_operacion}</b> | Bs.${p.monto_bs} | ${p.nombres} ${p.apellidos}</li>`);
+    if(unrecPagos.length>10) html+=`<li>...y ${unrecPagos.length-10} más</li>`;
+    html += `</ul>`;
+    document.getElementById('co-list').innerHTML = html;
+  } catch (e) { document.getElementById('co-list').innerHTML = `Error al cargar: ${e.message}`; }
+}
+async function loadResumen() {
+  try {
+    const data = await fetch('/api/pagos/cuadro_resumen').then(res=>res.json());
+    if (data.error) throw new Error(data.error);
+    let html = '';
+    data.forEach(b => {
+      html += `<tr><td style="text-align:left;font-size:11px;padding:6px"><b>${b.nombres} ${b.apellidos}</b><br><span style="color:#64748b;font-size:9px">${b.contrato}</span></td>`;
+      for(let i=1; i<=11; i++) {
+        const c = b.cuotas[i];
+        let color = '#f8fafc'; 
+        let text = '-';
+        if (c.status === 'registrado') { color = '#fef08a'; text = 'R'; }
+        else if (c.status.startsWith('conciliado')) { color = '#bbf7d0'; text = '✓'; }
+        html += `<td style="background:${color};border:1px solid #f1f5f9;font-size:12px;width:35px" title="${c.fecha||''} Ref: ${c.referencia||''} $${c.monto_usd||''}"><b>${text}</b></td>`;
+      }
+      html += `</tr>`;
+    });
+    document.getElementById('resumen-body').innerHTML = html;
+  } catch (e) { console.error('Error cargando resumen', e); }
+}
+function descargarInformePagos() {
+  window.open('/api/pagos/informe_pdf', '_blank');
 }
 
 init();

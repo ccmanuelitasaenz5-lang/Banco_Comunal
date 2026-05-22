@@ -40,7 +40,7 @@ With objShortcut
     
     ' Intentar usar el icono si existe
     Dim strIconPath
-    strIconPath = objFSO.BuildPath(strScriptPath, "static\img\logo.ico")
+    strIconPath = objFSO.BuildPath(strScriptPath, "static\img\semillero.ico")
     If objFSO.FileExists(strIconPath) Then
         .IconLocation = strIconPath & ",0"
     Else
@@ -51,11 +51,8 @@ With objShortcut
     .Save
 End With
 
-' Mensaje de éxito
-MsgBox "¡Acceso directo creado exitosamente!" & vbCrLf & vbCrLf & _
-       "Se ha creado el icono 'Semillero Comunal' en tu escritorio." & vbCrLf & _
-       "Haz doble clic en él para iniciar la aplicación.", _
-       vbInformation, "Semillero Comunal"
+' Success (no MsgBox to avoid wait)
+WScript.Echo "Icono creado exitosamente en el escritorio"
 
 ' Limpiar objetos
 Set objShortcut = Nothing
